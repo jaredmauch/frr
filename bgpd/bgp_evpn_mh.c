@@ -692,9 +692,15 @@ static int bgp_evpn_type4_route_update(struct bgp *bgp,
 
 	/* Build path-attribute for this route. */
 	bgp_attr_default_set(&attr, bgp, BGP_ORIGIN_IGP);
-	attr.nexthop = es->originator_ip;
-	attr.mp_nexthop_global_in = es->originator_ip;
-	attr.mp_nexthop_len = BGP_ATTR_NHLEN_IPV4;
+	/* v4 vtep use v4 attr.nexthop, v6 vtep use mp_nexthop_global */
+	if (IS_IPADDR_V4(&es->originator_ip)) {
+		attr.nexthop = es->originator_ip.ipaddr_v4;
+		attr.mp_nexthop_global_in = es->originator_ip.ipaddr_v4;
+		attr.mp_nexthop_len = BGP_ATTR_NHLEN_IPV4;
+	} else if (IS_IPADDR_V6(&es->originator_ip)) {
+		IPV6_ADDR_COPY(&attr.mp_nexthop_global, &es->originator_ip.ipaddr_v6);
+		attr.mp_nexthop_len = BGP_ATTR_NHLEN_IPV6_GLOBAL;
+	}
 
 	/* Set up extended community. */
 	bgp_evpn_type4_route_extcomm_build(es, &attr);
@@ -764,7 +770,7 @@ int bgp_evpn_type4_route_process(struct peer *peer, afi_t afi, safi_t safi,
 {
 	esi_t esi;
 	uint8_t ipaddr_len;
-	struct in_addr vtep_ip;
+	struct ipaddr vtep_ip;
 	struct prefix_rd prd;
 	struct prefix_evpn p;
 
@@ -793,12 +799,15 @@ int bgp_evpn_type4_route_process(struct peer *peer, afi_t afi, safi_t safi,
 	/* Get the IP. */
 	ipaddr_len = *pfx++;
 	if (ipaddr_len == IPV4_MAX_BITLEN) {
-		memcpy(&vtep_ip, pfx, IPV4_MAX_BYTELEN);
+		SET_IPADDR_V4(&vtep_ip);
+		memcpy(&vtep_ip.ipaddr_v4, pfx, IPV4_MAX_BYTELEN);
+	} else if (ipaddr_len == IPV6_MAX_BITLEN) {
+		SET_IPADDR_V6(&vtep_ip);
+		IPV6_ADDR_COPY(&vtep_ip.ipaddr_v6, pfx);
 	} else {
-		flog_err(
-				EC_BGP_EVPN_ROUTE_INVALID,
-				"%u:%s - Rx EVPN Type-4 NLRI with unsupported IP address length %d",
-				peer->bgp->vrf_id, peer->host, ipaddr_len);
+		flog_err(EC_BGP_EVPN_ROUTE_INVALID,
+			 "%u:%s - Rx EVPN Type-4 NLRI with unsupported IP address length %d",
+			 peer->bgp->vrf_id, peer->host, ipaddr_len);
 		return -1;
 	}
 
@@ -1001,9 +1010,15 @@ static int bgp_evpn_type1_route_update(struct bgp *bgp, struct bgp_evpn_es *es,
 
 	/* Build path-attribute for this route. */
 	bgp_attr_default_set(&attr, bgp, BGP_ORIGIN_IGP);
-	attr.nexthop = es->originator_ip;
-	attr.mp_nexthop_global_in = es->originator_ip;
-	attr.mp_nexthop_len = BGP_ATTR_NHLEN_IPV4;
+	if (IS_IPADDR_V4(&es->originator_ip)) {
+		attr.nexthop = es->originator_ip.ipaddr_v4;
+		attr.mp_nexthop_global_in = es->originator_ip.ipaddr_v4;
+		attr.mp_nexthop_len = BGP_ATTR_NHLEN_IPV4;
+	} else if (IS_IPADDR_V6(&es->originator_ip)) {
+		IPV6_ADDR_COPY(&attr.mp_nexthop_global, &es->originator_ip.ipaddr_v6);
+		attr.mp_nexthop_len = BGP_ATTR_NHLEN_IPV6_GLOBAL;
+	}
+
 
 	if (vpn) {
 		/* EAD-EVI route update */
@@ -1239,7 +1254,7 @@ int bgp_evpn_type1_route_process(struct peer *peer, afi_t afi, safi_t safi,
 	esi_t esi;
 	uint32_t eth_tag;
 	mpls_label_t label[BGP_MAX_LABELS] = {};
-	struct in_addr vtep_ip;
+	struct ipaddr vtep_ip;
 	struct prefix_evpn p;
 
 	if (psize != BGP_EVPN_TYPE1_PSIZE) {
@@ -1269,7 +1284,8 @@ int bgp_evpn_type1_route_process(struct peer *peer, afi_t afi, safi_t safi,
 	/* EAD route prefix doesn't include the nexthop in the global
 	 * table
 	 */
-	vtep_ip.s_addr = INADDR_ANY;
+	vtep_ip.ipa_type = IPADDR_V4;
+	vtep_ip.ipaddr_v4.s_addr = INADDR_ANY;
 	build_evpn_type1_prefix(&p, eth_tag, &esi, vtep_ip);
 	/* Process the route. */
 	if (attr) {
@@ -2436,8 +2452,7 @@ int bgp_evpn_local_es_del(struct bgp *bgp, esi_t *esi)
 /* Handle device to ES id association. Results in the creation of a local
  * ES.
  */
-int bgp_evpn_local_es_add(struct bgp *bgp, esi_t *esi,
-			  struct in_addr originator_ip, bool oper_up,
+int bgp_evpn_local_es_add(struct bgp *bgp, esi_t *esi, struct ipaddr originator_ip, bool oper_up,
 			  uint16_t df_pref, bool bypass)
 {
 	struct bgp_evpn_es *es;
