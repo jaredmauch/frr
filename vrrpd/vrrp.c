@@ -610,7 +610,7 @@ static void vrrp_router_destroy(struct vrrp_router *r)
 	if (r->sock_tx >= 0)
 		close(r->sock_tx);
 
-	/* FIXME: also delete list elements */
+	/* list_delete() will call vrrp_router_addr_list_del_cb for each element */
 	list_delete(&r->addrs);
 	XFREE(MTYPE_VRRP_RTR, r);
 }
@@ -1177,7 +1177,14 @@ static int vrrp_socket(struct vrrp_router *r)
 			if (c->address->family == AF_INET)
 				break;
 
-		assert(c);
+		if (!c) {
+			zlog_err(VRRP_LOGPFX VRRP_LOGPFX_VRID VRRP_LOGPFX_FAM
+				 "No IPv4 address found on interface %s",
+				 r->vr->vrid, family2str(r->family),
+				 r->vr->ifp->name);
+			failed = true;
+			goto done;
+		}
 		v4 = c->address->u.prefix4;
 
 		ret = setsockopt_ipv4_multicast(r->sock_rx, IP_ADD_MEMBERSHIP,
@@ -2429,4 +2436,10 @@ void vrrp_fini(void)
 	list_delete(&vrs);
 
 	hash_clean_and_free(&vrrp_vrouters_hash, NULL);
+
+	/* Clean up global sockets */
+	if (vrrp_garp_is_init())
+		vrrp_garp_fini();
+	if (vrrp_ndisc_is_init())
+		vrrp_ndisc_fini();
 }
