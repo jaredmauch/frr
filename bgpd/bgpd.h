@@ -1509,6 +1509,31 @@ extern struct peer_connection *bgp_peer_connection_new(struct peer *peer, const 
 extern void bgp_peer_connection_free(struct peer_connection **connection);
 extern void bgp_peer_connection_buffers_free(struct peer_connection *connection);
 
+/* BGP TCP authentication type (used in struct peer below) */
+enum bgp_auth_type {
+	BGP_AUTH_NONE,
+	BGP_AUTH_MD5,
+	BGP_AUTH_AO,
+};
+
+/* TCP-AO key algorithm (matches lib/sockopt.h enum tcp_ao_algorithm) */
+enum bgp_ao_algorithm {
+	BGP_AO_ALG_HMAC_SHA1 = 0,
+	BGP_AO_ALG_CMAC_AES128,
+	BGP_AO_ALG_MAX
+};
+
+/* One TCP-AO key for a peer */
+struct bgp_ao_key {
+	struct listnode listnode;
+	uint8_t send_id;
+	uint8_t recv_id;
+	uint8_t *key;
+	uint16_t keylen;
+	enum bgp_ao_algorithm algorithm;
+	int preference; /* -1 deprecated, 0 normal, 1 preferred */
+};
+
 /* BGP neighbor structure. */
 struct peer {
 	/* BGP structure.  */
@@ -2270,31 +2295,6 @@ DECLARE_QOBJ_TYPE(peer);
 
 #define PEER_PASSWORD_MINLEN	(1)
 #define PEER_PASSWORD_MAXLEN	(80)
-
-/* BGP TCP authentication type */
-enum bgp_auth_type {
-	BGP_AUTH_NONE,
-	BGP_AUTH_MD5,
-	BGP_AUTH_AO,
-};
-
-/* TCP-AO key algorithm (matches lib/sockopt.h enum tcp_ao_algorithm) */
-enum bgp_ao_algorithm {
-	BGP_AO_ALG_HMAC_SHA1 = 0,
-	BGP_AO_ALG_CMAC_AES128,
-	BGP_AO_ALG_MAX
-};
-
-/* One TCP-AO key for a peer */
-struct bgp_ao_key {
-	struct listnode listnode;
-	uint8_t send_id;
-	uint8_t recv_id;
-	uint8_t *key;
-	uint16_t keylen;
-	enum bgp_ao_algorithm algorithm;
-	int preference; /* -1 deprecated, 0 normal, 1 preferred */
-};
 
 /* This structure's member directly points incoming packet data
    stream. */
