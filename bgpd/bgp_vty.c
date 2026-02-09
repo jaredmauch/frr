@@ -5915,11 +5915,13 @@ DEFUN (no_neighbor_password,
 
 DEFUN (neighbor_authentication,
        neighbor_authentication_cmd,
-       "neighbor <A.B.C.D|X:X::X:X|WORD> authentication <none|md5|ao>",
+       "neighbor <A.B.C.D|X:X::X:X|WORD> authentication (none|md5|ao)",
        NEIGHBOR_STR
        NEIGHBOR_ADDR_STR2
        "Set TCP authentication type\n"
-       "No authentication, MD5, or TCP-AO (RFC 5925)\n")
+       "No authentication\n"
+       "MD5 authentication\n"
+       "TCP-AO (RFC 5925) authentication\n")
 {
 	int idx_peer = 1;
 	int idx_type = 3;
@@ -5942,20 +5944,20 @@ DEFUN (neighbor_authentication,
 
 DEFUN (neighbor_tcp_ao_key,
        neighbor_tcp_ao_key_cmd,
-       "neighbor <A.B.C.D|X:X::X:X|WORD> key (1-255) send-id (0-255) recv-id (0-255) algorithm <hmac-sha1|cmac-aes128> secret LINE [preferred|deprecated]",
+       "neighbor <A.B.C.D|X:X::X:X|WORD> key (1-255) send-id (0-255) recv-id (0-255) algorithm (hmac-sha1|cmac-aes128) secret LINE [preferred|deprecated]",
        NEIGHBOR_STR
        NEIGHBOR_ADDR_STR2
        "TCP-AO key\n"
-       "Key send-id (1-255)\n"
+       "Key ID (send-id value)\n"
        "Send key ID\n"
-       "Send key ID value (0-255)\n"
        "Recv key ID\n"
-       "Recv key ID value (0-255)\n"
        "MAC algorithm\n"
        "HMAC-SHA1\n"
        "CMAC-AES-128\n"
-       "Secret (quoted string or 0x hex)\n"
-       "Preferred or deprecated key\n")
+       "Secret (quoted string or hex)\n"
+       "Secret value\n"
+       "Preferred key\n"
+       "Deprecated key\n")
 {
 	int idx_peer = 1, idx_send = 4, idx_recv = 6, idx_alg = 8;
 	int idx_secret_val = 11, idx_pref = 12;
