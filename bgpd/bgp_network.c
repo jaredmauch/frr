@@ -7,7 +7,7 @@
 
 #include "frrevent.h"
 #include "sockunion.h"
-#include "sockopt.h"
+#include "lib/sockopt.h"
 #include "memory.h"
 #include "log.h"
 #include "if.h"
@@ -199,6 +199,101 @@ int bgp_md5_unset_prefix(struct bgp *bgp, struct prefix *p)
 {
 	return bgp_md5_set_prefix(bgp, p, NULL);
 }
+
+#if HAVE_DECL_TCP_AO_ADD_KEY
+int bgp_ao_set_prefix(struct bgp *bgp, struct prefix *p, struct list *ao_keys)
+{
+	int ret = 0;
+	union sockunion su;
+	struct listnode *node;
+	struct bgp_listener *listener;
+	struct frr_tcp_ao_key *keys;
+	struct listnode *knode;
+	struct bgp_ao_key *ak;
+	int nkeys, i, current_idx = 0, rnext_idx = -1;
+
+	if (!ao_keys || list_isempty(ao_keys))
+		return 0;
+	nkeys = listcount(ao_keys);
+	keys = XCALLOC(MTYPE_TMP, sizeof(*keys) * nkeys);
+	i = 0;
+	for (ALL_LIST_ELEMENTS_RO(ao_keys, knode, ak)) {
+		keys[i].send_id = ak->send_id;
+		keys[i].recv_id = ak->recv_id;
+		keys[i].key = ak->key;
+		keys[i].keylen = ak->keylen;
+		keys[i].algorithm = (enum tcp_ao_algorithm)ak->algorithm;
+		keys[i].preference = ak->preference;
+		if (ak->preference > 0)
+			current_idx = i;
+		else if (ak->preference < 0 && rnext_idx < 0)
+			rnext_idx = i;
+		i++;
+	}
+	if (rnext_idx < 0)
+		rnext_idx = (current_idx + 1) < nkeys ? current_idx + 1 : -1;
+
+	prefix2sockunion(p, &su);
+	frr_with_privs(&bgpd_privs) {
+		for (ALL_LIST_ELEMENTS_RO(bm->listen_sockets, node, listener)) {
+			if (listener->su.sa.sa_family == p->family &&
+			    ((bgp->vrf_id == VRF_DEFAULT && !listener->bgp) ||
+			     (listener->bgp == bgp))) {
+				ret = sockopt_tcp_ao_add_keys(
+					listener->fd, &su, p->prefixlen,
+					keys, nkeys, current_idx, rnext_idx);
+				break;
+			}
+		}
+	}
+	XFREE(MTYPE_TMP, keys);
+	return ret;
+}
+
+int bgp_ao_unset_prefix(struct bgp *bgp, struct prefix *p,
+		       struct list *ao_keys)
+{
+	int ret = 0;
+	union sockunion su;
+	struct listnode *node;
+	struct bgp_listener *listener;
+	struct frr_tcp_ao_key *keys;
+	struct listnode *knode;
+	struct bgp_ao_key *ak;
+	int nkeys, i;
+
+	if (!ao_keys || list_isempty(ao_keys))
+		return 0;
+	nkeys = listcount(ao_keys);
+	keys = XCALLOC(MTYPE_TMP, sizeof(*keys) * nkeys);
+	i = 0;
+	for (ALL_LIST_ELEMENTS_RO(ao_keys, knode, ak)) {
+		keys[i].send_id = ak->send_id;
+		keys[i].recv_id = ak->recv_id;
+		keys[i].key = NULL;
+		keys[i].keylen = 0;
+		keys[i].algorithm = TCP_AO_ALG_HMAC_SHA1;
+		keys[i].preference = 0;
+		i++;
+	}
+
+	prefix2sockunion(p, &su);
+	frr_with_privs(&bgpd_privs) {
+		for (ALL_LIST_ELEMENTS_RO(bm->listen_sockets, node, listener)) {
+			if (listener->su.sa.sa_family == p->family &&
+			    ((bgp->vrf_id == VRF_DEFAULT && !listener->bgp) ||
+			     (listener->bgp == bgp))) {
+				ret = sockopt_tcp_ao_del_keys(listener->fd, &su,
+							      p->prefixlen,
+							      keys, nkeys);
+				break;
+			}
+		}
+	}
+	XFREE(MTYPE_TMP, keys);
+	return ret;
+}
+#endif /* HAVE_DECL_TCP_AO_ADD_KEY */
 
 int bgp_md5_set(struct peer_connection *connection)
 {
@@ -883,7 +978,7 @@ enum connect_result bgp_connect(struct peer_connection *connection)
 	}
 #endif
 
-	if (peer->password) {
+	if (peer->auth_type == BGP_AUTH_MD5 && peer->password) {
 		uint16_t prefixlen = peer->connection->su.sa.sa_family == AF_INET
 					     ? IPV4_MAX_BITLEN
 					     : IPV6_MAX_BITLEN;
@@ -894,6 +989,57 @@ enum connect_result bgp_connect(struct peer_connection *connection)
 		bgp_md5_set_connect(connection->fd, &connection->su, prefixlen,
 				    peer->password);
 	}
+
+#if HAVE_DECL_TCP_AO_ADD_KEY
+	{
+		struct list *ao_keys = peer->ao_keys;
+
+		if (!ao_keys && peer->group && peer->group->conf->ao_keys)
+			ao_keys = peer->group->conf->ao_keys;
+		if (peer->auth_type == BGP_AUTH_AO && ao_keys &&
+		    !list_isempty(ao_keys)) {
+			uint16_t prefixlen = connection->su.sa.sa_family == AF_INET
+						     ? IPV4_MAX_BITLEN
+						     : IPV6_MAX_BITLEN;
+			struct frr_tcp_ao_key *keys;
+			struct listnode *node;
+			struct bgp_ao_key *ak;
+			int nkeys = listcount(ao_keys);
+			int i = 0, current_idx = 0, rnext_idx = -1;
+
+			keys = XCALLOC(MTYPE_TMP, sizeof(*keys) * nkeys);
+			for (ALL_LIST_ELEMENTS_RO(ao_keys, node, ak)) {
+				keys[i].send_id = ak->send_id;
+				keys[i].recv_id = ak->recv_id;
+				keys[i].key = ak->key;
+				keys[i].keylen = ak->keylen;
+				keys[i].algorithm = (enum tcp_ao_algorithm)ak->algorithm;
+				keys[i].preference = ak->preference;
+				if (ak->preference > 0)
+					current_idx = i;
+				else if (ak->preference < 0 && rnext_idx < 0)
+					rnext_idx = i;
+				i++;
+			}
+			if (rnext_idx < 0)
+				rnext_idx = (current_idx + 1) < nkeys ? current_idx + 1
+								     : -1;
+			frr_with_privs(&bgpd_privs) {
+				int ret = sockopt_tcp_ao_add_keys(
+					connection->fd, &connection->su, prefixlen,
+					keys, nkeys, current_idx, rnext_idx);
+				if (ret == -2)
+					flog_warn(EC_BGP_NO_TCP_MD5,
+						  "TCP-AO not supported on this platform");
+				else if (ret < 0)
+					flog_warn(EC_BGP_NO_TCP_MD5,
+						  "Failed to set TCP-AO keys for peer %pSU",
+						  &connection->su);
+			}
+			XFREE(MTYPE_TMP, keys);
+		}
+	}
+#endif
 
 	/* Update source bind. */
 	if (bgp_update_source(connection) < 0) {

@@ -656,6 +656,218 @@ int sockopt_tcp_signature(int sock, union sockunion *su, const char *password)
 	return sockopt_tcp_signature_ext(sock, su, 0, password);
 }
 
+#if HAVE_DECL_TCP_AO_ADD_KEY
+#ifdef __linux__
+/*
+ * Linux TCP-AO kernel API. We define the option number and struct locally
+ * to match the kernel ABI when system headers do not yet provide them.
+ */
+#ifndef TCP_AO_ADD_KEY
+#define TCP_AO_ADD_KEY 38
+#endif
+#ifndef TCP_AO_DEL_KEY
+#define TCP_AO_DEL_KEY 39
+#endif
+
+#ifndef _UAPI_LINUX_TCP_AO_FRR
+#define _UAPI_LINUX_TCP_AO_FRR
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+struct tcp_ao_add_frr {
+	struct sockaddr_storage addr;
+	char alg_name[64];
+	int32_t ifindex;
+	uint32_t set_current : 1, set_rnext : 1, reserved : 30;
+	uint16_t reserved2;
+	uint8_t prefix;
+	uint8_t sndid;
+	uint8_t rcvid;
+	uint8_t maclen;
+	uint8_t keyflags;
+	uint8_t keylen;
+	uint8_t key[TCP_AO_MAXKEYLEN];
+} __attribute__((aligned(8)));
+
+struct tcp_ao_del_frr {
+	struct sockaddr_storage addr;
+	int32_t ifindex;
+	uint32_t set_current : 1, set_rnext : 1, del_async : 1, reserved : 29;
+	uint16_t reserved2;
+	uint8_t prefix;
+	uint8_t sndid;
+	uint8_t rcvid;
+	uint8_t current_key;
+	uint8_t rnext;
+	uint8_t keyflags;
+} __attribute__((aligned(8)));
+
+#endif /* _UAPI_LINUX_TCP_AO_FRR */
+
+static const char *tcp_ao_alg_name(enum tcp_ao_algorithm alg)
+{
+	switch (alg) {
+	case TCP_AO_ALG_HMAC_SHA1:
+		return "hmac(sha1)";
+	case TCP_AO_ALG_CMAC_AES128:
+		return "cmac(aes)";
+	default:
+		return "hmac(sha1)";
+	}
+}
+
+static uint8_t tcp_ao_maclen(enum tcp_ao_algorithm alg)
+{
+	switch (alg) {
+	case TCP_AO_ALG_HMAC_SHA1:
+		return 12;
+	case TCP_AO_ALG_CMAC_AES128:
+		return 12;
+	default:
+		return 12;
+	}
+}
+
+int sockopt_tcp_ao_add_keys(int sock, union sockunion *su, uint16_t prefixlen,
+			    const struct frr_tcp_ao_key *keys, int nkeys,
+			    int current_key_idx, int rnext_key_idx)
+{
+	union sockunion su2;
+	int i, ret = 0;
+
+	if (!keys || nkeys <= 0)
+		return -1;
+
+	memcpy(&su2, su, sizeof(union sockunion));
+	if (su2.sa.sa_family == AF_INET)
+		su2.sin.sin_port = 0;
+	else if (su2.sa.sa_family == AF_INET6)
+		su2.sin6.sin6_port = 0;
+
+	for (i = 0; i < nkeys && ret == 0; i++) {
+		struct tcp_ao_add_frr add;
+		const struct frr_tcp_ao_key *k = &keys[i];
+
+		memset(&add, 0, sizeof(add));
+		memcpy(&add.addr, &su2, sizeof(su2));
+		add.prefix = (uint8_t)prefixlen;
+		add.sndid = k->send_id;
+		add.rcvid = k->recv_id;
+		add.maclen = tcp_ao_maclen(k->algorithm);
+		add.keylen = k->keylen <= TCP_AO_MAXKEYLEN ? k->keylen : TCP_AO_MAXKEYLEN;
+		if (k->key && add.keylen)
+			memcpy(add.key, k->key, add.keylen);
+		strncpy(add.alg_name, tcp_ao_alg_name(k->algorithm),
+			sizeof(add.alg_name) - 1);
+		add.alg_name[sizeof(add.alg_name) - 1] = '\0';
+
+		if (i == current_key_idx)
+			add.set_current = 1;
+		if (i == rnext_key_idx)
+			add.set_rnext = 1;
+		if (i == 0 && current_key_idx < 0 && rnext_key_idx < 0)
+			add.set_current = 1;
+
+		ret = setsockopt(sock, IPPROTO_TCP, TCP_AO_ADD_KEY, &add,
+				 sizeof(add));
+		if (ret < 0) {
+			flog_err_sys(EC_LIB_SYSTEM_CALL,
+				     "sockopt_tcp_ao_add_keys: setsockopt(TCP_AO_ADD_KEY): %s",
+				     safe_strerror(errno));
+			return -1;
+		}
+	}
+	return 0;
+}
+
+int sockopt_tcp_ao_del_keys(int sock, union sockunion *su, uint16_t prefixlen,
+			    const struct frr_tcp_ao_key *keys, int nkeys)
+{
+	union sockunion su2;
+	int i, ret = 0;
+
+	if (!keys || nkeys <= 0)
+		return -1;
+
+	memcpy(&su2, su, sizeof(union sockunion));
+	if (su2.sa.sa_family == AF_INET)
+		su2.sin.sin_port = 0;
+	else if (su2.sa.sa_family == AF_INET6)
+		su2.sin6.sin6_port = 0;
+
+	for (i = 0; i < nkeys && ret == 0; i++) {
+		struct tcp_ao_del_frr del;
+		const struct frr_tcp_ao_key *k = &keys[i];
+
+		memset(&del, 0, sizeof(del));
+		memcpy(&del.addr, &su2, sizeof(su2));
+		del.prefix = (uint8_t)prefixlen;
+		del.sndid = k->send_id;
+		del.rcvid = k->recv_id;
+
+		ret = setsockopt(sock, IPPROTO_TCP, TCP_AO_DEL_KEY, &del,
+				 sizeof(del));
+		if (ret < 0) {
+			flog_err_sys(EC_LIB_SYSTEM_CALL,
+				     "sockopt_tcp_ao_del_keys: setsockopt(TCP_AO_DEL_KEY): %s",
+				     safe_strerror(errno));
+			return -1;
+		}
+	}
+	return 0;
+}
+#else  /* !__linux__ */
+int sockopt_tcp_ao_add_keys(int sock, union sockunion *su, uint16_t prefixlen,
+			    const struct frr_tcp_ao_key *keys, int nkeys,
+			    int current_key_idx, int rnext_key_idx)
+{
+	(void)sock;
+	(void)su;
+	(void)prefixlen;
+	(void)keys;
+	(void)nkeys;
+	(void)current_key_idx;
+	(void)rnext_key_idx;
+	return -2;
+}
+int sockopt_tcp_ao_del_keys(int sock, union sockunion *su, uint16_t prefixlen,
+			    const struct frr_tcp_ao_key *keys, int nkeys)
+{
+	(void)sock;
+	(void)su;
+	(void)prefixlen;
+	(void)keys;
+	(void)nkeys;
+	return -2;
+}
+#endif /* __linux__ */
+#else  /* !HAVE_DECL_TCP_AO_ADD_KEY */
+int sockopt_tcp_ao_add_keys(int sock, union sockunion *su, uint16_t prefixlen,
+			    const struct frr_tcp_ao_key *keys, int nkeys,
+			    int current_key_idx, int rnext_key_idx)
+{
+	(void)sock;
+	(void)su;
+	(void)prefixlen;
+	(void)keys;
+	(void)nkeys;
+	(void)current_key_idx;
+	(void)rnext_key_idx;
+	return -2;
+}
+int sockopt_tcp_ao_del_keys(int sock, union sockunion *su, uint16_t prefixlen,
+			    const struct frr_tcp_ao_key *keys, int nkeys)
+{
+	(void)sock;
+	(void)su;
+	(void)prefixlen;
+	(void)keys;
+	(void)nkeys;
+	return -2;
+}
+#endif /* HAVE_DECL_TCP_AO_ADD_KEY */
+
 /* set TCP mss value to socket */
 int sockopt_tcp_mss_set(int sock, int tcp_maxseg)
 {

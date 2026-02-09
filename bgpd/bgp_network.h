@@ -27,6 +27,10 @@ extern int bgp_getsockname(struct peer_connection *connection);
 extern int bgp_md5_set_prefix(struct bgp *bgp, struct prefix *p,
 			      const char *password);
 extern int bgp_md5_unset_prefix(struct bgp *bgp, struct prefix *p);
+extern int bgp_ao_set_prefix(struct bgp *bgp, struct prefix *p,
+			    struct list *ao_keys);
+extern int bgp_ao_unset_prefix(struct bgp *bgp, struct prefix *p,
+			      struct list *ao_keys);
 extern int bgp_md5_set(struct peer_connection *connection);
 extern int bgp_md5_unset(struct peer_connection *connection);
 extern int bgp_set_socket_ttl(struct peer_connection *connection);

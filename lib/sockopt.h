@@ -178,6 +178,48 @@ extern int setsockopt_tcp_keepalive(int sock, uint16_t keepalive_idle,
  */
 extern void sockopt_ip_transparent(int sock);
 
+/*
+ * TCP-AO (TCP Authentication Option, RFC 5925) key and API.
+ * When HAVE_DECL_TCP_AO_ADD_KEY is set, the following can be used to
+ * configure TCP-AO keys on a socket for a given peer address/prefix.
+ */
+#define TCP_AO_MAXKEYLEN 80
+
+enum tcp_ao_algorithm {
+	TCP_AO_ALG_HMAC_SHA1 = 0,
+	TCP_AO_ALG_CMAC_AES128,
+	TCP_AO_ALG_MAX
+};
+
+struct frr_tcp_ao_key {
+	uint8_t send_id;
+	uint8_t recv_id;
+	const uint8_t *key;
+	uint16_t keylen;
+	enum tcp_ao_algorithm algorithm;
+	int preference; /* -1 deprecated, 0 normal, 1 preferred */
+};
+
+/*
+ * Add TCP-AO keys to a socket for the given peer address/prefix.
+ * keys[] has nkeys entries. current_key_idx and rnext_key_idx are
+ * indices into keys[] for the current and next keys (use -1 for none).
+ * Returns 0 on success, -1 on error, -2 if TCP-AO is not supported.
+ */
+extern int sockopt_tcp_ao_add_keys(int sock, union sockunion *su,
+				  uint16_t prefixlen,
+				  const struct frr_tcp_ao_key *keys, int nkeys,
+				  int current_key_idx, int rnext_key_idx);
+
+/*
+ * Remove TCP-AO keys from a socket for the given peer address/prefix.
+ * keys[] has nkeys entries (only send_id and recv_id are used per key).
+ * Returns 0 on success, -1 on error, -2 if TCP-AO is not supported.
+ */
+extern int sockopt_tcp_ao_del_keys(int sock, union sockunion *su,
+				  uint16_t prefixlen,
+				  const struct frr_tcp_ao_key *keys, int nkeys);
+
 #ifdef __cplusplus
 }
 #endif

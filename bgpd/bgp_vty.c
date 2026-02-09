@@ -5910,6 +5910,139 @@ DEFUN (no_neighbor_password,
 	return bgp_vty_return(vty, ret);
 }
 
+DEFUN (neighbor_authentication,
+       neighbor_authentication_cmd,
+       "neighbor <A.B.C.D|X:X::X:X|WORD> authentication (none|md5|ao)",
+       NEIGHBOR_STR
+       NEIGHBOR_ADDR_STR2
+       "Set TCP authentication type\n"
+       "No authentication\n"
+       "MD5 authentication\n"
+       "TCP-AO (RFC 5925) authentication\n")
+{
+	int idx_peer = 1;
+	int idx_type = 3;
+	struct peer *peer;
+	enum bgp_auth_type auth_type;
+
+	peer = peer_and_group_lookup_vty(vty, argv[idx_peer]->arg);
+	if (!peer)
+		return CMD_WARNING_CONFIG_FAILED;
+
+	if (strcmp(argv[idx_type]->arg, "none") == 0)
+		auth_type = BGP_AUTH_NONE;
+	else if (strcmp(argv[idx_type]->arg, "md5") == 0)
+		auth_type = BGP_AUTH_MD5;
+	else
+		auth_type = BGP_AUTH_AO;
+
+	return bgp_vty_return(vty, peer_authentication_set(peer, auth_type));
+}
+
+DEFUN (neighbor_tcp_ao_key,
+       neighbor_tcp_ao_key_cmd,
+       "neighbor <A.B.C.D|X:X::X:X|WORD> key (1-255) send-id (0-255) recv-id (0-255) algorithm (hmac-sha1|cmac-aes128) secret LINE [preferred|deprecated]",
+       NEIGHBOR_STR
+       NEIGHBOR_ADDR_STR2
+       "TCP-AO key\n"
+       "Key ID (send-id value)\n"
+       "Send key ID\n"
+       "Recv key ID\n"
+       "MAC algorithm\n"
+       "HMAC-SHA1\n"
+       "CMAC-AES-128\n"
+       "Secret (quoted string or hex)\n"
+       "Secret value\n"
+       "Preferred key\n"
+       "Deprecated key\n")
+{
+	int idx_peer = 1, idx_send = 4, idx_recv = 6, idx_alg = 8;
+	int idx_secret_val = 11, idx_pref = 12;
+	struct peer *peer;
+	uint8_t send_id, recv_id;
+	enum bgp_ao_algorithm alg;
+	uint8_t *secret;
+	int secret_len;
+	int preference = 0;
+	int ret;
+
+	peer = peer_and_group_lookup_vty(vty, argv[idx_peer]->arg);
+	if (!peer)
+		return CMD_WARNING_CONFIG_FAILED;
+
+	send_id = (uint8_t)atoi(argv[idx_send]->arg);
+	recv_id = (uint8_t)atoi(argv[idx_recv]->arg);
+	if (strcmp(argv[idx_alg]->arg, "cmac-aes128") == 0)
+		alg = BGP_AO_ALG_CMAC_AES128;
+	else
+		alg = BGP_AO_ALG_HMAC_SHA1;
+
+	{
+		const char *secret_str = argv[idx_secret_val]->arg;
+		if (strncmp(secret_str, "0x", 2) == 0) {
+			/* Hex-encoded secret */
+			const char *hex = secret_str + 2;
+			size_t hexlen = strlen(hex);
+			if (hexlen % 2 || hexlen / 2 > TCP_AO_MAXKEYLEN) {
+				vty_out(vty, "%% Invalid hex secret length\n");
+				return CMD_WARNING_CONFIG_FAILED;
+			}
+			secret_len = (int)(hexlen / 2);
+			secret = XCALLOC(MTYPE_TMP, secret_len);
+			for (int i = 0; i < secret_len; i++) {
+				unsigned int b;
+				if (sscanf(hex + (i * 2), "%2x", &b) != 1) {
+					XFREE(MTYPE_TMP, secret);
+					vty_out(vty, "%% Invalid hex in secret\n");
+					return CMD_WARNING_CONFIG_FAILED;
+				}
+				secret[i] = (uint8_t)b;
+			}
+			ret = peer_ao_key_add(peer, send_id, recv_id, alg, secret,
+					      (uint16_t)secret_len, preference);
+			XFREE(MTYPE_TMP, secret);
+			return bgp_vty_return(vty, ret);
+		}
+		secret = (uint8_t *)secret_str;
+		secret_len = strlen(secret_str);
+	}
+	if (secret_len > TCP_AO_MAXKEYLEN) {
+		vty_out(vty, "%% Secret too long (max %d)\n", TCP_AO_MAXKEYLEN);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+	if (argc > idx_pref) {
+		if (strcmp(argv[idx_pref]->arg, "preferred") == 0)
+			preference = 1;
+		else
+			preference = -1;
+	}
+	ret = peer_ao_key_add(peer, send_id, recv_id, alg, secret,
+			      (uint16_t)secret_len, preference);
+	return bgp_vty_return(vty, ret);
+}
+
+DEFUN (no_neighbor_tcp_ao_key,
+       no_neighbor_tcp_ao_key_cmd,
+       "no neighbor <A.B.C.D|X:X::X:X|WORD> key (1-255)",
+       NO_STR
+       NEIGHBOR_STR
+       NEIGHBOR_ADDR_STR2
+       "TCP-AO key\n"
+       "Key send-id to remove\n")
+{
+	int idx_peer = 2, idx_key = 4;
+	struct peer *peer;
+	uint8_t send_id;
+	int ret;
+
+	peer = peer_and_group_lookup_vty(vty, argv[idx_peer]->arg);
+	if (!peer)
+		return CMD_WARNING_CONFIG_FAILED;
+	send_id = (uint8_t)atoi(argv[idx_key]->arg);
+	ret = peer_ao_key_delete(peer, send_id);
+	return bgp_vty_return(vty, ret);
+}
+
 DEFUN (neighbor_activate,
        neighbor_activate_cmd,
        "neighbor <A.B.C.D|X:X::X:X|WORD> activate",
@@ -19619,10 +19752,38 @@ static void bgp_config_write_peer_global(struct vty *vty, struct bgp *bgp,
 	if (peer->bfd_config)
 		bgp_bfd_peer_config_write(vty, peer, addr);
 
+	/* authentication */
+	if (peer->auth_type != BGP_AUTH_NONE) {
+		vty_out(vty, " neighbor %s authentication %s\n", addr,
+			peer->auth_type == BGP_AUTH_MD5 ? "md5" : "ao");
+	}
 	/* password */
 	if (peergroup_flag_check(peer, PEER_FLAG_PASSWORD))
 		vty_out(vty, " neighbor %s password %s\n", addr,
 			peer->password);
+	/* TCP-AO keys */
+	if (peer->auth_type == BGP_AUTH_AO && peer->ao_keys) {
+		struct listnode *node;
+		struct bgp_ao_key *ak;
+
+		for (ALL_LIST_ELEMENTS_RO(peer->ao_keys, node, ak)) {
+			const char *alg_str =
+				ak->algorithm == BGP_AO_ALG_CMAC_AES128
+					? "cmac-aes128"
+					: "hmac-sha1";
+			const char *pref_str =
+				ak->preference > 0 ? " preferred"
+				: ak->preference < 0 ? " deprecated"
+						   : "";
+			vty_out(vty,
+				" neighbor %s key %u send-id %u recv-id %u algorithm %s secret 0x",
+				addr, ak->send_id, ak->send_id, ak->recv_id,
+				alg_str);
+			for (uint16_t i = 0; i < ak->keylen; i++)
+				vty_out(vty, "%02x", ak->key[i]);
+			vty_out(vty, "%s\n", pref_str);
+		}
+	}
 
 	/* neighbor solo */
 	if (peergroup_flag_check(peer, PEER_FLAG_LONESOUL))
@@ -21757,6 +21918,11 @@ void bgp_vty_init(void)
 	/* "neighbor password" commands. */
 	install_element(BGP_NODE, &neighbor_password_cmd);
 	install_element(BGP_NODE, &no_neighbor_password_cmd);
+
+	/* "neighbor authentication" and TCP-AO key commands. */
+	install_element(BGP_NODE, &neighbor_authentication_cmd);
+	install_element(BGP_NODE, &neighbor_tcp_ao_key_cmd);
+	install_element(BGP_NODE, &no_neighbor_tcp_ao_key_cmd);
 
 	/* "neighbor activate" commands. */
 	install_element(BGP_NODE, &neighbor_activate_hidden_cmd);

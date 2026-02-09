@@ -1782,6 +1782,32 @@ if test "$ac_cv_have_decl_TCP_MD5SIG" = "no"; then
        AC_CHECK_DECLS([TCP_MD5SIG], [], [], MD5_INCLUDES)])
 fi
 
+dnl ------------------------
+dnl TCP-AO (TCP Authentication Option) socket option
+dnl ------------------------
+AC_CHECK_HEADER([netinet/tcp.h],
+   [m4_define([TCPAO_INCLUDES],
+      FRR_INCLUDES
+      [#include <netinet/tcp.h>
+    ])
+    AC_CHECK_DECLS([TCP_AO_ADD_KEY], [], [], TCPAO_INCLUDES)],
+   [],
+   FRR_INCLUDES)
+if test "$ac_cv_have_decl_TCP_AO_ADD_KEY" = "no"; then
+  AC_CHECK_HEADER([linux/tcp.h],
+       [m4_define([TCPAO_INCLUDES],
+          FRR_INCLUDES
+          [#include <linux/tcp.h>
+        ])
+       AC_CHECK_DECLS([TCP_AO_ADD_KEY], [], [], TCPAO_INCLUDES)])
+fi
+AC_MSG_CHECKING([for TCP-AO (TCP_AO_ADD_KEY) support])
+if test "$ac_cv_have_decl_TCP_AO_ADD_KEY" = "yes"; then
+  AC_MSG_RESULT([yes])
+else
+  AC_MSG_RESULT([no])
+fi
+
 LIBS_save="$LIBS"
 AC_CHECK_LIB([crypt], [crypt], [], [
   AC_CHECK_LIB([crypto], [DES_crypt])

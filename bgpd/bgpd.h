@@ -1875,8 +1875,12 @@ struct peer {
 
 	enum bgp_addpath_strat addpath_type[AFI_MAX][SAFI_MAX];
 
-	/* MD5 password */
+	/* TCP authentication type and keys */
+	enum bgp_auth_type auth_type;
+	/* MD5 password (when auth_type == BGP_AUTH_MD5) */
 	char *password;
+	/* TCP-AO keys (when auth_type == BGP_AUTH_AO) */
+	struct list *ao_keys;
 
 	/* default-originate route-map.  */
 	struct {
@@ -2125,6 +2129,7 @@ struct peer {
 #define PEER_DOWN_RTT_SHUTDOWN          35U /* Automatically shutdown due to RTT */
 #define PEER_DOWN_SUPPRESS_FIB_PENDING	 36U /* Suppress fib pending changed */
 #define PEER_DOWN_PASSWORD_CHANGE	 37U /* neighbor password command */
+#define PEER_DOWN_AO_KEYS_CHANGE	 47U /* neighbor TCP-AO keys / authentication command */
 #define PEER_DOWN_ROUTER_ID_ZERO	 38U /* router-id is 0.0.0.0 */
 #define PEER_DOWN_CEASE_UNSPECIFIC	 39U /* Cease unspecific: 0 */
 #define PEER_DOWN_CEASE_BFD_DOWN	 PEER_DOWN_BFD_DOWN
@@ -2265,6 +2270,31 @@ DECLARE_QOBJ_TYPE(peer);
 
 #define PEER_PASSWORD_MINLEN	(1)
 #define PEER_PASSWORD_MAXLEN	(80)
+
+/* BGP TCP authentication type */
+enum bgp_auth_type {
+	BGP_AUTH_NONE,
+	BGP_AUTH_MD5,
+	BGP_AUTH_AO,
+};
+
+/* TCP-AO key algorithm (matches lib/sockopt.h enum tcp_ao_algorithm) */
+enum bgp_ao_algorithm {
+	BGP_AO_ALG_HMAC_SHA1 = 0,
+	BGP_AO_ALG_CMAC_AES128,
+	BGP_AO_ALG_MAX
+};
+
+/* One TCP-AO key for a peer */
+struct bgp_ao_key {
+	struct listnode listnode;
+	uint8_t send_id;
+	uint8_t recv_id;
+	uint8_t *key;
+	uint16_t keylen;
+	enum bgp_ao_algorithm algorithm;
+	int preference; /* -1 deprecated, 0 normal, 1 preferred */
+};
 
 /* This structure's member directly points incoming packet data
    stream. */
@@ -2821,6 +2851,13 @@ extern int peer_advertise_map_set(struct peer *peer, afi_t afi, safi_t safi,
 
 extern int peer_password_set(struct peer *peer, const char *password);
 extern int peer_password_unset(struct peer *peer);
+extern int peer_authentication_set(struct peer *peer, enum bgp_auth_type auth_type);
+extern int peer_ao_key_add(struct peer *peer, uint8_t send_id, uint8_t recv_id,
+			  enum bgp_ao_algorithm algorithm, const uint8_t *secret,
+			  uint16_t secret_len, int preference);
+extern int peer_ao_key_delete(struct peer *peer, uint8_t send_id);
+extern void bgp_ao_keys_free(struct list **ao_keys);
+extern struct list *bgp_ao_keys_dup(const struct list *ao_keys);
 
 extern int peer_unsuppress_map_unset(struct peer *peer, afi_t afi, safi_t safi);
 

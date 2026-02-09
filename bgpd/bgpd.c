@@ -1694,7 +1694,9 @@ struct peer *peer_new(struct bgp *bgp, union sockunion *su, enum connection_dire
 	peer = peer_lock(peer); /* initial reference */
 	peer->local_role = ROLE_UNDEFINED;
 	peer->remote_role = ROLE_UNDEFINED;
+	peer->auth_type = BGP_AUTH_NONE;
 	peer->password = NULL;
+	peer->ao_keys = NULL;
 	peer->max_packet_size = BGP_STANDARD_MESSAGE_MAX_PACKET_SIZE;
 	peer->last_reset = PEER_DOWN_NONE;
 	peer->down_last_reset = PEER_DOWN_NONE;
@@ -1758,6 +1760,49 @@ struct peer *peer_new(struct bgp *bgp, union sockunion *su, enum connection_dire
 	return peer;
 }
 
+void bgp_ao_keys_free(struct list **ao_keys)
+{
+	struct listnode *node, *nnode;
+	struct bgp_ao_key *ak;
+
+	if (!ao_keys || !*ao_keys)
+		return;
+	for (ALL_LIST_ELEMENTS(*ao_keys, node, nnode, ak)) {
+		listnode_delete(*ao_keys, ak);
+		if (ak->key)
+			XFREE(MTYPE_BGP_AO_KEY_STR, ak->key);
+		XFREE(MTYPE_BGP_AO_KEY, ak);
+	}
+	list_delete(ao_keys);
+}
+
+struct list *bgp_ao_keys_dup(const struct list *ao_keys)
+{
+	struct list *new_list;
+	struct listnode *node;
+	struct bgp_ao_key *ak, *new_ak;
+
+	if (!ao_keys || list_isempty(ao_keys))
+		return NULL;
+	new_list = list_new();
+	for (ALL_LIST_ELEMENTS_RO((struct list *)ao_keys, node, ak)) {
+		new_ak = XCALLOC(MTYPE_BGP_AO_KEY, sizeof(*new_ak));
+		new_ak->send_id = ak->send_id;
+		new_ak->recv_id = ak->recv_id;
+		new_ak->keylen = ak->keylen;
+		new_ak->algorithm = ak->algorithm;
+		new_ak->preference = ak->preference;
+		if (ak->key && ak->keylen) {
+			new_ak->key = XCALLOC(MTYPE_BGP_AO_KEY_STR, ak->keylen);
+			memcpy(new_ak->key, ak->key, ak->keylen);
+		} else {
+			new_ak->key = NULL;
+		}
+		listnode_add(new_list, new_ak);
+	}
+	return new_list;
+}
+
 /*
  * This function is invoked when a duplicate peer structure associated with
  * a neighbor is being deleted. If this about-to-be-deleted structure is
@@ -1810,12 +1855,15 @@ void peer_xfer_config(struct peer *peer_dst, struct peer *peer_src)
 	peer_dst->v_routeadv = peer_src->v_routeadv;
 	peer_dst->v_delayopen = peer_src->v_delayopen;
 
-	/* password apply */
+	/* authentication apply */
+	peer_dst->auth_type = peer_src->auth_type;
 	if (peer_src->password) {
 		XFREE(MTYPE_PEER_PASSWORD, peer_dst->password);
 		peer_dst->password =
 			XSTRDUP(MTYPE_PEER_PASSWORD, peer_src->password);
 	}
+	bgp_ao_keys_free(&peer_dst->ao_keys);
+	peer_dst->ao_keys = bgp_ao_keys_dup(peer_src->ao_keys);
 
 	FOREACH_AFI_SAFI (afi, safi) {
 		peer_dst->afc[afi][safi] = peer_src->afc[afi][safi];
@@ -2923,13 +2971,15 @@ int peer_delete(struct peer *peer)
 	if (peer_is_config_node(peer))
 		bgp_unlink_nexthop_by_peer(peer);
 
-	/* Password configuration */
-	if (CHECK_FLAG(peer->flags, PEER_FLAG_PASSWORD)) {
+	/* Authentication configuration */
+	if (peer->auth_type == BGP_AUTH_MD5 &&
+	    CHECK_FLAG(peer->flags, PEER_FLAG_PASSWORD)) {
 		XFREE(MTYPE_PEER_PASSWORD, peer->password);
 		if (!accept_peer && !BGP_CONNECTION_SU_UNSPEC(peer->connection) &&
 		    !CHECK_FLAG(peer->sflags, PEER_STATUS_GROUP))
 			bgp_md5_unset(peer->connection);
 	}
+	bgp_ao_keys_free(&peer->ao_keys);
 
 	bgp_timer_set(peer->connection); /* stops all timers for Deleted */
 
@@ -3380,6 +3430,12 @@ int peer_group_listen_range_add(struct peer_group *group, struct prefix *range)
 	if (group->conf->password)
 		bgp_md5_set_prefix(group->bgp, prefix, group->conf->password);
 
+#if HAVE_DECL_TCP_AO_ADD_KEY
+	/* Update TCP-AO keys for new ranges */
+	if (group->conf->auth_type == BGP_AUTH_AO && group->conf->ao_keys)
+		bgp_ao_set_prefix(group->bgp, prefix, group->conf->ao_keys);
+#endif
+
 	return 0;
 }
 
@@ -3423,6 +3479,12 @@ int peer_group_listen_range_del(struct peer_group *group, struct prefix *range)
 	/* Remove passwords for deleted ranges */
 	if (group->conf->password)
 		bgp_md5_unset_prefix(group->bgp, prefix);
+
+#if HAVE_DECL_TCP_AO_ADD_KEY
+	/* Remove TCP-AO keys for deleted ranges */
+	if (group->conf->auth_type == BGP_AUTH_AO && group->conf->ao_keys)
+		bgp_ao_unset_prefix(group->bgp, prefix, group->conf->ao_keys);
+#endif
 
 	prefix_free(&prefix);
 	return 0;
@@ -7268,6 +7330,48 @@ int peer_local_as_unset(struct peer *peer)
 	return 0;
 }
 
+int peer_authentication_set(struct peer *peer, enum bgp_auth_type auth_type)
+{
+	struct peer *member;
+	struct listnode *node, *nnode;
+
+	if (peer->auth_type == auth_type)
+		return BGP_SUCCESS;
+
+	peer->auth_type = auth_type;
+	if (auth_type == BGP_AUTH_NONE) {
+		if (CHECK_FLAG(peer->flags, PEER_FLAG_PASSWORD)) {
+			XFREE(MTYPE_PEER_PASSWORD, peer->password);
+			UNSET_FLAG(peer->flags, PEER_FLAG_PASSWORD);
+		}
+		bgp_ao_keys_free(&peer->ao_keys);
+	}
+
+	if (!CHECK_FLAG(peer->sflags, PEER_STATUS_GROUP)) {
+		peer_set_last_reset(peer, PEER_DOWN_AO_KEYS_CHANGE);
+		if (!peer_notify_config_change(peer->connection))
+			bgp_session_reset(peer);
+		return BGP_SUCCESS;
+	}
+
+	for (ALL_LIST_ELEMENTS(peer->group->peer, node, nnode, member)) {
+		if (CHECK_FLAG(member->flags_override, PEER_FLAG_PASSWORD))
+			continue;
+		member->auth_type = auth_type;
+		if (auth_type == BGP_AUTH_NONE) {
+			if (member->password) {
+				XFREE(MTYPE_PEER_PASSWORD, member->password);
+				UNSET_FLAG(member->flags, PEER_FLAG_PASSWORD);
+			}
+			bgp_ao_keys_free(&member->ao_keys);
+		}
+		peer_set_last_reset(member, PEER_DOWN_AO_KEYS_CHANGE);
+		if (!peer_notify_config_change(member->connection))
+			bgp_session_reset(member);
+	}
+	return BGP_SUCCESS;
+}
+
 /* Set password for authenticating with the peer. */
 int peer_password_set(struct peer *peer, const char *password)
 {
@@ -7279,6 +7383,7 @@ int peer_password_set(struct peer *peer, const char *password)
 	if ((len < PEER_PASSWORD_MINLEN) || (len > PEER_PASSWORD_MAXLEN))
 		return BGP_ERR_INVALID_VALUE;
 
+	peer->auth_type = BGP_AUTH_MD5;
 	/* Set flag and configuration on peer. */
 	peer_flag_set(peer, PEER_FLAG_PASSWORD);
 	if (peer->password && strcmp(peer->password, password) == 0)
@@ -7410,6 +7515,74 @@ int peer_password_unset(struct peer *peer)
 		bgp_md5_unset_prefix(peer->bgp, lr);
 
 	return 0;
+}
+
+int peer_ao_key_add(struct peer *peer, uint8_t send_id, uint8_t recv_id,
+		   enum bgp_ao_algorithm algorithm, const uint8_t *secret,
+		   uint16_t secret_len, int preference)
+{
+	struct bgp_ao_key *ak;
+	struct listnode *node;
+
+	if (secret_len > TCP_AO_MAXKEYLEN)
+		return BGP_ERR_INVALID_VALUE;
+	/* Check for duplicate send_id */
+	for (ALL_LIST_ELEMENTS_RO(peer->ao_keys, node, ak)) {
+		if (ak->send_id == send_id)
+			return BGP_ERR_INVALID_VALUE;
+	}
+	ak = XCALLOC(MTYPE_BGP_AO_KEY, sizeof(*ak));
+	ak->send_id = send_id;
+	ak->recv_id = recv_id;
+	ak->algorithm = algorithm;
+	ak->preference = preference;
+	ak->keylen = secret_len;
+	if (secret_len) {
+		ak->key = XCALLOC(MTYPE_BGP_AO_KEY_STR, secret_len);
+		memcpy(ak->key, secret, secret_len);
+	} else {
+		ak->key = NULL;
+	}
+	if (!peer->ao_keys)
+		peer->ao_keys = list_new();
+	listnode_add(peer->ao_keys, ak);
+	peer->auth_type = BGP_AUTH_AO;
+	if (!CHECK_FLAG(peer->sflags, PEER_STATUS_GROUP)) {
+		peer_set_last_reset(peer, PEER_DOWN_AO_KEYS_CHANGE);
+		if (!peer_notify_config_change(peer->connection))
+			bgp_session_reset(peer);
+		return BGP_SUCCESS;
+	}
+	/* TODO: apply to group members */
+	return BGP_SUCCESS;
+}
+
+int peer_ao_key_delete(struct peer *peer, uint8_t send_id)
+{
+	struct listnode *node, *nnode;
+	struct bgp_ao_key *ak;
+
+	if (!peer->ao_keys)
+		return BGP_ERR_ENTRY_NOT_FOUND;
+	for (ALL_LIST_ELEMENTS(peer->ao_keys, node, nnode, ak)) {
+		if (ak->send_id == send_id) {
+			listnode_delete(peer->ao_keys, ak);
+			if (ak->key)
+				XFREE(MTYPE_BGP_AO_KEY_STR, ak->key);
+			XFREE(MTYPE_BGP_AO_KEY, ak);
+			if (list_isempty(peer->ao_keys)) {
+				list_delete(&peer->ao_keys);
+				peer->auth_type = BGP_AUTH_NONE;
+			}
+			if (!CHECK_FLAG(peer->sflags, PEER_STATUS_GROUP)) {
+				peer_set_last_reset(peer, PEER_DOWN_AO_KEYS_CHANGE);
+				if (!peer_notify_config_change(peer->connection))
+					bgp_session_reset(peer);
+			}
+			return BGP_SUCCESS;
+		}
+	}
+	return BGP_ERR_ENTRY_NOT_FOUND;
 }
 
 
