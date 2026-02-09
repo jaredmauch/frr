@@ -7563,7 +7563,7 @@ int peer_ao_key_delete(struct peer *peer, uint8_t send_id)
 	struct bgp_ao_key *ak;
 
 	if (!peer->ao_keys)
-		return BGP_ERR_ENTRY_NOT_FOUND;
+		return BGP_ERR_AO_KEY_NOT_FOUND;
 	for (ALL_LIST_ELEMENTS(peer->ao_keys, node, nnode, ak)) {
 		if (ak->send_id == send_id) {
 			listnode_delete(peer->ao_keys, ak);
@@ -7582,7 +7582,7 @@ int peer_ao_key_delete(struct peer *peer, uint8_t send_id)
 			return BGP_SUCCESS;
 		}
 	}
-	return BGP_ERR_ENTRY_NOT_FOUND;
+	return BGP_ERR_AO_KEY_NOT_FOUND;
 }
 
 

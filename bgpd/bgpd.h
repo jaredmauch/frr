@@ -2557,7 +2557,10 @@ enum bgp_create_error_code {
 
 	/*BGP Open Policy ERRORS */
 	BGP_ERR_INVALID_ROLE_NAME = -35,
-	BGP_ERR_INVALID_INTERNAL_ROLE = -36
+	BGP_ERR_INVALID_INTERNAL_ROLE = -36,
+
+	/* TCP-AO */
+	BGP_ERR_AO_KEY_NOT_FOUND = -37
 };
 
 /*

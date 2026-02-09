@@ -1046,6 +1046,9 @@ int bgp_vty_return(struct vty *vty, enum bgp_create_error_code ret)
 	case BGP_ERR_INVALID_INTERNAL_ROLE:
 		str = "External roles can be set only on eBGP session";
 		break;
+	case BGP_ERR_AO_KEY_NOT_FOUND:
+		str = "TCP-AO key not found.";
+		break;
 	}
 	if (str) {
 		vty_out(vty, "%% %s\n", str);
