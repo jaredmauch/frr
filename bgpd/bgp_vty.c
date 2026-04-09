@@ -15809,7 +15809,6 @@ static void bgp_show_peer(struct vty *vty, struct peer *p, uint16_t sh_flags, bo
 	if (show_brief) {
 		if (use_json) {
 			time_t uptime;
-			struct tm tm;
 
 			if (p->hostname)
 				json_object_string_add(json_neigh, "hostname", p->hostname);
@@ -15827,10 +15826,9 @@ static void bgp_show_peer(struct vty *vty, struct peer *p, uint16_t sh_flags, bo
 
 			uptime = monotime(NULL);
 			uptime -= p->resettime;
-			gmtime_r(&uptime, &tm);
+
 			json_object_int_add(json_neigh, "lastResetTimerMsecs",
-					    (tm.tm_sec * 1000) + (tm.tm_min * 60000) +
-						    (tm.tm_hour * 3600000));
+					    (int64_t)uptime * 1000);
 			json_stat = json_object_new_object();
 			json_object_int_add(json_stat, "totalSent", PEER_TOTAL_TX(p));
 			json_object_int_add(json_stat, "totalRecv", PEER_TOTAL_RX(p));
@@ -17364,16 +17362,12 @@ static void bgp_show_peer(struct vty *vty, struct peer *p, uint16_t sh_flags, bo
 	} else {
 		if (use_json) {
 			time_t uptime;
-			struct tm tm;
 
 			uptime = monotime(NULL);
 			uptime -= p->resettime;
-			gmtime_r(&uptime, &tm);
 
 			json_object_int_add(json_neigh, "lastResetTimerMsecs",
-					    (tm.tm_sec * 1000)
-						    + (tm.tm_min * 60000)
-						    + (tm.tm_hour * 3600000));
+					    (int64_t)uptime * 1000);
 			bgp_show_peer_reset(NULL, p, json_neigh, true);
 		} else {
 			vty_out(vty, "  Last reset %s, ",
